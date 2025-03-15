@@ -1,0 +1,1132 @@
+// This is the complete Prisma schema file for the Hotel PMS
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Hotel information and settings
+model Hotel {
+  id              String    @id @default(uuid())
+  name            String
+  address         String
+  city            String
+  country         String
+  postalCode      String?
+  phone           String
+  email           String?
+  website         String?
+  taxId           String    // Tax identification number
+  regNumber       String?   // Registration or business number
+  fiscalDeviceId  String?   // Fiscal device ID for tax reporting
+  fiscalCompanyId String?   // Company ID in the fiscal system
+  logoUrl         String?
+  primaryCurrency String    @default("EUR")  // Default currency (Euro)
+  checkInTime     String    @default("13:00")  // Default check-in time
+  checkOutTime    String    @default("11:00")  // Default check-out time
+  timeZone        String    @default("UTC")
+  invoicePrefix   String    @default("INV")    // Prefix for invoice numbers
+  fiscalPrefix    String?   @default("FIS")    // Prefix for fiscal invoice numbers
+  taxEnabled      Boolean   @default(false)    // Whether tax is enabled globally
+  defaultTaxRate  Decimal?  @db.Decimal(5, 2)  // Default tax rate (e.g., 6%)
+  invoiceNotes    String?   // Default notes to appear on invoices
+  termsAndConditions String?
+  isMultiProperty Boolean   @default(false)    // Flag indicating if this is a multi-property hotel
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  @@map("hotel")
+}
+
+// Property/Building model
+model Property {
+  id              String    @id @default(uuid())
+  name            String
+  code            String    @unique  // Short code for the property (e.g., "HTL", "APT")
+  address         String?
+  description     String?
+  isActive        Boolean   @default(true)
+  sortOrder       Int       @default(0)  // For display ordering
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  // Relations
+  rooms           Room[]
+  roomTypes       RoomType[]
+  cleaningSchedule RoomCleaning[]
+  
+  @@map("properties")
+}
+
+// Guest/customer model
+model Guest {
+  id              String           @id @default(uuid())
+  email           String           @unique
+  password        String?          // Optional for walk-in guests
+  firstName       String
+  lastName        String
+  phone           String?
+  address         String?
+  city            String?
+  country         String?
+  postalCode      String?
+  company         String?          // Company name for business travelers
+  taxId           String?          // Tax ID for business invoices
+  idType          String?          // Passport, ID card, etc.
+  idNumber        String?
+  dateOfBirth     DateTime?
+  nationality     String?
+  notes           String?
+  isActive        Boolean          @default(true)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  
+  // Relations
+  reservations    Reservation[]    // Guest's reservations
+  invoices        Invoice[]        // Invoices issued to this guest
+  vehicles        GuestVehicle[]   // Guest vehicles
+  
+  @@map("guests")
+}
+
+// Guest vehicle information
+model GuestVehicle {
+  id              String    @id @default(uuid())
+  guestId         String
+  licensePlate    String
+  make            String?   // Car manufacturer
+  model           String?   // Car model
+  color           String?
+  notes           String?
+  isPrimary       Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  // Relations
+  guest           Guest     @relation(fields: [guestId], references: [id])
+  
+  @@map("guest_vehicles")
+  @@index([licensePlate])
+}
+
+// Staff model for hotel employees (admin, receptionist)
+model Staff {
+  id              String           @id @default(uuid())
+  email           String           @unique
+  password        String
+  firstName       String
+  lastName        String
+  phone           String
+  role            StaffRole
+  employeeId      String?          @unique
+  isActive        Boolean          @default(true)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  
+  // Relations
+  payments        Payment[]        // For payments received
+  shifts          Shift[]          // For receptionist shifts
+  invoices        Invoice[]        // Invoices created by staff
+  roomMoves       RoomMove[]       // Room moves performed by staff
+  timeRecords     StaffTimeRecord[] // Time tracking records
+  monthlyHours    StaffMonthlyHours[] // Monthly hour summaries
+  inventoryTransactions InventoryTransaction[] // Inventory transactions
+  purchaseOrders  PurchaseOrder[]  // Purchase orders created
+  assignedMaintenanceIssues MaintenanceIssue[] @relation("AssignedMaintenanceStaff") // Maintenance issues assigned to staff
+  reportedMaintenanceIssues MaintenanceIssue[] @relation("ReportedByStaff") // Maintenance issues reported by staff
+  
+  @@map("staff")
+}
+
+enum StaffRole {
+  ADMIN
+  RECEPTIONIST
+  MANAGER
+  HOUSEKEEPING
+  MAINTENANCE
+}
+
+// Room types (e.g. Single, Double, Suite)
+model RoomType {
+  id              String    @id @default(uuid())
+  name            String
+  description     String
+  basePrice       Decimal   @db.Decimal(10, 2)  // Base price for RO (Room Only)
+  capacity        Int
+  maxAdults       Int       @default(2)
+  maxChildren     Int       @default(2)
+  extraAdultPrice Decimal?  @db.Decimal(10, 2)  // Price for each adult beyond standard occupancy
+  extraChildPrice Decimal?  @db.Decimal(10, 2)  // Price for each child beyond standard occupancy
+  propertyId      String    // Which property this room type belongs to
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  // Relations
+  property        Property  @relation(fields: [propertyId], references: [id])
+  rooms           Room[]
+  amenities       RoomTypeAmenity[]
+  mealPlanPrices  MealPlanPrice[]
+  
+  @@unique([propertyId, name])  // Room type names must be unique within a property
+  @@map("room_types")
+}
+
+// Individual rooms
+model Room {
+  id              String        @id @default(uuid())
+  roomNumber      String
+  floor           String
+  status          RoomStatus    @default(AVAILABLE)
+  condition       RoomCondition @default(GOOD)
+  notes           String?
+  isActive        Boolean       @default(true)
+  roomTypeId      String
+  propertyId      String        // Which property/building this room belongs to
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  
+  // Relations
+  roomType        RoomType      @relation(fields: [roomTypeId], references: [id])
+  property        Property      @relation(fields: [propertyId], references: [id])
+  reservations    RoomReservation[]
+  housekeepingLogs HousekeepingLog[]
+  amenities       RoomAmenity[]
+  maintenanceIssues MaintenanceIssue[]
+  cleaningSchedule RoomCleaning[] // Cleaning schedule for this room
+  itemInstances   RoomItemInstance[] // Items in this room
+  
+  @@unique([propertyId, roomNumber])  // Room numbers must be unique within a property
+  @@map("rooms")
+}
+
+enum RoomStatus {
+  AVAILABLE
+  OCCUPIED
+  MAINTENANCE
+  CLEANING
+  OUT_OF_ORDER
+  RESERVED
+}
+
+enum RoomCondition {
+  EXCELLENT
+  GOOD
+  FAIR
+  NEEDS_ATTENTION
+  REQUIRES_MAINTENANCE
+}
+
+// Main reservation record (historical and future)
+model Reservation {
+  id              String            @id @default(uuid())
+  reservationCode String            @unique
+  guestId         String
+  status          ReservationStatus @default(CONFIRMED)
+  checkInDate     DateTime          // Will be set to 1:00 PM (13:00)
+  checkOutDate    DateTime          // Will be set to 11:00 AM
+  totalAmount     Decimal           @db.Decimal(10, 2)
+  balanceAmount   Decimal           @db.Decimal(10, 2) // Remaining amount to be paid
+  specialRequests String?
+  adultCount      Int               @default(1)
+  childCount      Int               @default(0)
+  source          ReservationSource @default(DIRECT)
+  isActive        Boolean           @default(true)     // Flag to identify active reservations
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  
+  // Relations
+  guest           Guest             @relation(fields: [guestId], references: [id])
+  roomReservations RoomReservation[]
+  payments        PaymentTransaction[]
+  activeBooking   ActiveBooking?
+  invoices        Invoice[]         // Invoices related to this reservation
+  roomMoves       RoomMove[]
+  
+  @@map("reservations")
+  @@index([checkInDate, checkOutDate])
+  @@index([isActive])
+}
+
+enum ReservationStatus {
+  PENDING
+  CONFIRMED
+  CHECKED_IN
+  CHECKED_OUT
+  CANCELLED
+  NO_SHOW
+}
+
+enum ReservationSource {
+  DIRECT
+  WEBSITE
+  BOOKING_PARTNER
+  PHONE
+  WALK_IN
+}
+
+// Active bookings for improved query performance
+model ActiveBooking {
+  id              String    @id @default(uuid())
+  reservationId   String    @unique
+  roomIds         String[]  // Store the room IDs for faster lookup
+  checkInDate     DateTime  // Will be set to 1:00 PM (13:00)
+  checkOutDate    DateTime  // Will be set to 11:00 AM
+  status          ReservationStatus
+  
+  // Relations
+  reservation     Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  
+  @@index([checkInDate, checkOutDate])
+  @@map("active_bookings")
+}
+
+// Meal plan options
+enum MealPlan {
+  RO  // Room Only
+  BB  // Bed & Breakfast
+  HB  // Half Board (Breakfast and Dinner)
+  FB  // Full Board (Breakfast, Lunch, Dinner)
+  AI  // All Inclusive
+}
+
+// Room reservation with pricing details and meal plan
+model RoomReservation {
+  id              String    @id @default(uuid())
+  reservationId   String
+  roomId          String
+  mealPlan        MealPlan  @default(RO)  // Primary meal plan package selection
+  adultCount      Int       @default(1)
+  childCount      Int       @default(0)
+  basePrice       Decimal   @db.Decimal(10, 2)  // Original calculated price per night
+  finalPrice      Decimal   @db.Decimal(10, 2)  // Final price after any modifications
+  priceModified   Boolean   @default(false)     // Flag if price was modified by staff
+  modificationReason String?                    // Reason for price modification
+  modifiedBy      String?                       // Staff ID who modified the price
+  isActive        Boolean   @default(true)      // Flag to mark if this is the current active assignment
+  
+  // Relations
+  reservation     Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  room            Room        @relation(fields: [roomId], references: [id])
+  roomMoves       RoomMove[]  @relation("OldRoomReservation")
+  movedFrom       RoomMove[]  @relation("NewRoomReservation")
+  mealServices    MealService[]  // Daily meal services for this room reservation
+  
+  @@unique([reservationId, roomId])
+  @@map("room_reservations")
+}
+
+// Guest meal plan tracking for daily meal services
+model MealService {
+  id              String    @id @default(uuid())
+  roomReservationId String   // Link directly to room reservation 
+  date            DateTime  @db.Date
+  breakfastCount  Int       @default(0)  // Number of breakfasts for this room/date
+  lunchCount      Int       @default(0)  // Number of lunches for this room/date
+  dinnerCount     Int       @default(0)  // Number of dinners for this room/date
+  isModified      Boolean   @default(false)  // Flag if modified from standard meal plan
+  specialRequests String?   // Special dietary requirements or requests
+  notes           String?   // Additional notes (e.g., reason for modification)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  // Relations
+  roomReservation RoomReservation @relation(fields: [roomReservationId], references: [id], onDelete: Cascade)
+  
+  @@unique([roomReservationId, date])
+  @@map("meal_services")
+  @@index([date])
+}
+
+// Daily meal reporting for kitchen (denormalized for performance)
+model DailyMealSummary {
+  id              String    @id @default(uuid())
+  date            DateTime  @db.Date
+  propertyId      String?   // Optional: specific property or null for all properties
+  totalBreakfast  Int       @default(0)
+  totalLunch      Int       @default(0)
+  totalDinner     Int       @default(0)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  @@unique([date, propertyId])
+  @@map("daily_meal_summaries")
+}
+
+// Meal plan pricing per room type
+model MealPlanPrice {
+  id              String    @id @default(uuid())
+  roomTypeId      String
+  mealPlan        MealPlan
+  adultPrice      Decimal   @db.Decimal(10, 2)  // Additional price per adult for this meal plan
+  childPrice      Decimal   @db.Decimal(10, 2)  // Additional price per child for this meal plan
+  
+  // Relations
+  roomType        RoomType  @relation(fields: [roomTypeId], references: [id])
+  
+  @@unique([roomTypeId, mealPlan])
+  @@map("meal_plan_prices")
+}
+
+// Room movement tracking
+model RoomMove {
+  id                  String    @id @default(uuid())
+  reservationId       String
+  oldRoomReservationId String
+  newRoomReservationId String
+  movedAt             DateTime  @default(now())
+  movedByStaffId      String
+  reason              RoomMoveReason
+  notes               String?
+  
+  // Relations
+  reservation         Reservation @relation(fields: [reservationId], references: [id])
+  oldRoomReservation  RoomReservation @relation("OldRoomReservation", fields: [oldRoomReservationId], references: [id])
+  newRoomReservation  RoomReservation @relation("NewRoomReservation", fields: [newRoomReservationId], references: [id])
+  movedByStaff        Staff @relation(fields: [movedByStaffId], references: [id])
+  
+  @@map("room_moves")
+}
+
+enum RoomMoveReason {
+  GUEST_REQUEST
+  MAINTENANCE_ISSUE
+  OVERBOOKING
+  UPGRADE
+  DOWNGRADE
+  NOISE_COMPLAINT
+  ROOM_DEFECT
+  OTHER
+}
+
+// Room cleaning schedule and status
+model RoomCleaning {
+  id              String          @id @default(uuid())
+  roomId          String
+  propertyId      String          // Explicitly link to property for filtering
+  date            DateTime        @db.Date
+  cleaningType    CleaningType    @default(DAILY)
+  status          CleaningStatus  @default(PENDING)
+  assignedTo      String?         // Staff ID if assigned
+  completedAt     DateTime?
+  notes           String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  
+  // Relations
+  room            Room            @relation(fields: [roomId], references: [id])
+  property        Property        @relation(fields: [propertyId], references: [id])
+  
+  @@unique([roomId, date])
+  @@map("room_cleanings")
+  @@index([date, status])
+  @@index([assignedTo, date])
+  @@index([propertyId, date])    // For filtering cleaning by property
+}
+
+enum CleaningType {
+  DAILY           // Regular daily cleaning
+  CHECKOUT        // Deep cleaning after checkout
+  MAINTENANCE     // Special cleaning after maintenance
+  DEEP            // Scheduled deep cleaning
+}
+
+enum CleaningStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  VERIFIED
+  SKIPPED         // For when room is unavailable or guest requested no cleaning
+}
+
+// Payment system
+model Payment {
+  id              String    @id @default(uuid())
+  cashierId       String    // The receptionist who processed the payment
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  // Relations
+  staff           Staff     @relation(fields: [cashierId], references: [id])
+  transactions    PaymentTransaction[]
+  
+  @@map("payments")
+}
+
+// Payment transactions
+model PaymentTransaction {
+  id              String        @id @default(uuid())
+  paymentId       String
+  reservationId   String
+  amount          Decimal       @db.Decimal(10, 2)      // Amount in primary currency
+  originalAmount  Decimal?      @db.Decimal(10, 2)      // Original amount if paid in different currency
+  originalCurrency String?                              // Currency of original payment if different
+  exchangeRate    Decimal?      @db.Decimal(10, 6)      // Exchange rate used for conversion
+  method          PaymentMethod
+  status          PaymentStatus @default(COMPLETED)
+  reference       String?       // Reference number, receipt number, etc.
+  notes           String?
+  createdAt       DateTime      @default(now())
+  
+  // Relations
+  payment         Payment       @relation(fields: [paymentId], references: [id])
+  reservation     Reservation   @relation(fields: [reservationId], references: [id])
+  
+  @@map("payment_transactions")
+}
+
+enum PaymentMethod {
+  CASH
+  CREDIT_CARD
+  DEBIT_CARD
+  BANK_TRANSFER
+  ONLINE_PAYMENT
+}
+
+enum PaymentStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REFUNDED
+}
+
+// Currency exchange rates
+model CurrencyRate {
+  id              String    @id @default(uuid())
+  currency        String    // Currency code (USD, EUR, GBP, etc.)
+  symbol          String    // Currency symbol ($, €, £, etc.)
+  rate            Decimal   @db.Decimal(10, 6) // Exchange rate relative to primary currency
+  isActive        Boolean   @default(true)
+  lastUpdated     DateTime  @default(now())
+  updatedBy       String?   // Staff ID who updated the rate
+  
+  @@unique([currency])
+  @@map("currency_rates")
+}
+
+// Receptionist shift tracking
+model Shift {
+  id              String    @id @default(uuid())
+  receptionistId  String
+  startTime       DateTime
+  endTime         DateTime?
+  cashBalance     Decimal?  @db.Decimal(10, 2) // Expected cash at end of shift
+  notes           String?
+  status          ShiftStatus @default(ACTIVE)
+  isReconciled    Boolean   @default(false)    // Flag showing if shift has been reconciled
+  reconciledAt    DateTime?                    // When the shift was reconciled
+  
+  // Cash reconciliation records
+  cashReconciliation CashReconciliation[]
+  
+  // Relations
+  receptionist    Staff      @relation(fields: [receptionistId], references: [id])
+  
+  @@map("shifts")
+}
+
+enum ShiftStatus {
+  ACTIVE
+  CLOSED
+  VERIFIED
+}
+
+// Cash reconciliation for shift end
+model CashReconciliation {
+  id              String    @id @default(uuid())
+  shiftId         String
+  currencyCode    String
+  expectedAmount  Decimal   @db.Decimal(10, 2)  // System calculated amount
+  actualAmount    Decimal   @db.Decimal(10, 2)  // Amount reported by receptionist
+  difference      Decimal   @db.Decimal(10, 2)  // Difference between expected and actual
+  notes           String?                       // Explanation for any differences
+  createdAt       DateTime  @default(now())
+  
+  // Relations
+  shift           Shift     @relation(fields: [shiftId], references: [id])
+  
+  @@map("cash_reconciliations")
+}
+
+// Staff time tracking
+model StaffTimeRecord {
+  id              String    @id @default(uuid())
+  staffId         String
+  date            DateTime  @db.Date
+  startTime       DateTime
+  endTime         DateTime?
+  breakMinutes    Int       @default(0)
+  totalHours      Decimal?  @db.Decimal(5, 2)
+  notes           String?
+  createdBy       String?   // Staff ID who created/edited the record
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  // Relations
+  staff           Staff     @relation(fields: [staffId], references: [id])
+  
+  @@map("staff_time_records")
+  @@index([staffId, date])
+}
+
+// Staff monthly hour summary (for performance)
+model StaffMonthlyHours {
+  id              String    @id @default(uuid())
+  staffId         String
+  year            Int
+  month           Int
+  totalHours      Decimal   @db.Decimal(6, 2)
+  regularHours    Decimal   @db.Decimal(6, 2)
+  overtimeHours   Decimal?  @db.Decimal(6, 2)
+  
+  // Relations
+  staff           Staff     @relation(fields: [staffId], references: [id])
+  
+  @@unique([staffId, year, month])
+  @@map("staff_monthly_hours")
+}
+
+// Invoice model for financial records
+model Invoice {
+  id              String    @id @default(uuid())
+  invoiceNumber   String    @unique
+  fiscalNumber    String?   @unique  // Fiscal/tax invoice number when applicable
+  reservationId   String?
+  guestId         String
+  staffId         String    // Staff member who created the invoice
+  issueDate       DateTime  @default(now())
+  dueDate         DateTime?
+  subtotal        Decimal   @db.Decimal(10, 2)
+  taxAmount       Decimal   @db.Decimal(10, 2)
+  discountAmount  Decimal?  @db.Decimal(10, 2)
+  totalAmount     Decimal   @db.Decimal(10, 2)
+  currency        String    // Currency used for this invoice
+  status          InvoiceStatus @default(ISSUED)
+  isFiscal        Boolean   @default(false)  // Whether this is a fiscal/tax invoice
+  fiscalStatus    FiscalStatus? // Status in the fiscal/tax system
+  fiscalIssuedAt  DateTime?     // When the fiscal invoice was issued
+  fiscalData      Json?         // Additional fiscal data as JSON
+  notes           String?
+  paymentTerms    String?
+  issuedTo        String?   // Company name if different from guest
+  taxIdNumber     String?   // Client tax ID if applicable
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  // Relations
+  guest           Guest     @relation(fields: [guestId], references: [id])
+  staff           Staff     @relation(fields: [staffId], references: [id])
+  reservation     Reservation? @relation(fields: [reservationId], references: [id])
+  lineItems       InvoiceLineItem[]
+  payments        InvoicePayment[]
+  
+  @@map("invoices")
+}
+
+// Line items for invoices
+model InvoiceLineItem {
+  id              String    @id @default(uuid())
+  invoiceId       String
+  description     String
+  quantity        Decimal   @db.Decimal(10, 2)
+  unitPrice       Decimal   @db.Decimal(10, 2)
+  taxRate         Decimal   @db.Decimal(5, 2)
+  taxAmount       Decimal   @db.Decimal(10, 2)
+  totalAmount     Decimal   @db.Decimal(10, 2)
+  taxCode         String?   // Tax code for fiscal reporting
+  productCode     String?   // Standard product code for fiscal reporting
+  
+  // Relations
+  invoice         Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  
+  @@map("invoice_line_items")
+}
+
+// Payments linked to invoices
+model InvoicePayment {
+  id              String    @id @default(uuid())
+  invoiceId       String
+  amount          Decimal   @db.Decimal(10, 2)
+  originalAmount  Decimal?  @db.Decimal(10, 2)      // Original amount if paid in different currency
+  currency        String    // Currency of this payment
+  exchangeRate    Decimal?  @db.Decimal(10, 6)
+  method          PaymentMethod
+  reference       String?
+  paymentDate     DateTime  @default(now())
+  receivedBy      String    // Staff ID who received payment
+  notes           String?
+  
+  // Relations
+  invoice         Invoice   @relation(fields: [invoiceId], references: [id])
+  
+  @@map("invoice_payments")
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PAID
+  PARTIALLY_PAID
+  CANCELLED
+  OVERDUE
+}
+
+enum FiscalStatus {
+  PENDING
+  SUBMITTED
+  ACCEPTED
+  REJECTED
+  CANCELLED
+}
+
+// Taxes and settings
+model TaxSetting {
+  id              String    @id @default(uuid())
+  name            String    // E.g., "Value Added Tax", "City Tax"
+  rate            Decimal   @db.Decimal(5, 2) // Percentage rate
+  code            String?   // Tax code for reports
+  isDefault       Boolean   @default(false)
+  isEnabled       Boolean   @default(false)  // Can be enabled/disabled when needed
+  appliesTo       TaxAppliesTo @default(ALL)
+  isActive        Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  @@map("tax_settings")
+}
+
+enum TaxAppliesTo {
+  ALL
+  ACCOMMODATION
+  FOOD
+  BEVERAGES
+  SERVICES
+}
+
+// Fiscal system integration logs
+model FiscalSystemLog {
+  id              String    @id @default(uuid())
+  invoiceId       String?
+  action          String    // e.g., "submit_invoice", "cancel_invoice", "get_status"
+  requestData     Json?     // Request data sent to fiscal system
+  responseData    Json?     // Response data received from fiscal system
+  status          String    // Success, failure, etc.
+  errorMessage    String?   // Error message if any
+  createdAt       DateTime  @default(now())
+  
+  @@map("fiscal_system_logs")
+  @@index([invoiceId])
+  @@index([createdAt])
+}
+
+// Rates and seasonal pricing
+model RateCalendar {
+  id              String    @id @default(uuid())
+  roomTypeId      String
+  propertyId      String    // Explicitly link to property
+  date            DateTime  @db.Date
+  price           Decimal   @db.Decimal(10, 2)  // Base rate override for specific date (RO)
+  bbSupplement    Decimal?  @db.Decimal(10, 2)  // BB supplement override for specific date
+  hbSupplement    Decimal?  @db.Decimal(10, 2)  // HB supplement override for specific date
+  fbSupplement    Decimal?  @db.Decimal(10, 2)  // FB supplement override for specific date
+  aiSupplement    Decimal?  @db.Decimal(10, 2)  // AI supplement override for specific date
+  availableRooms  Int
+  isBlocked       Boolean   @default(false)     // For blocking dates
+  minimumStay     Int       @default(1)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  @@unique([roomTypeId, date])
+  @@index([propertyId, date])     // For filtering rates by property and date
+  @@map("rate_calendar")
+}
+
+// Room amenities catalog
+model Amenity {
+  id              String    @id @default(uuid())
+  name            String    @unique
+  description     String?
+  icon            String?   // Icon identifier or URL
+  category        String?   // Category of amenity (bathroom, entertainment, etc.)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  // Relations
+  roomTypes       RoomTypeAmenity[]
+  rooms           RoomAmenity[]
+  
+  @@map("amenities")
+}
+
+// Junction table for room types and amenities
+model RoomTypeAmenity {
+  id              String    @id @default(uuid())
+  roomTypeId      String
+  amenityId       String
+  
+  // Relations
+  roomType        RoomType  @relation(fields: [roomTypeId], references: [id])
+  amenity         Amenity   @relation(fields: [amenityId], references: [id])
+  
+  @@unique([roomTypeId, amenityId])
+  @@map("room_type_amenities")
+}
+
+// Junction table for individual rooms and amenities
+model RoomAmenity {
+  id              String    @id @default(uuid())
+  roomId          String
+  amenityId       String
+  status          AmenityStatus @default(AVAILABLE)
+  notes           String?
+  
+  // Relations
+  room            Room      @relation(fields: [roomId], references: [id])
+  amenity         Amenity   @relation(fields: [amenityId], references: [id])
+  
+  @@unique([roomId, amenityId])
+  @@map("room_amenities")
+}
+
+enum AmenityStatus {
+  AVAILABLE
+  OUT_OF_ORDER
+  REQUIRES_ATTENTION
+}
+
+// Housekeeping management
+model HousekeepingLog {
+  id              String    @id @default(uuid())
+  roomId          String
+  status          HousekeepingStatus
+  notes           String?
+  completedAt     DateTime?
+  createdAt       DateTime  @default(now())
+  
+  // Relations
+  room            Room      @relation(fields: [roomId], references: [id])
+  
+  @@map("housekeeping_logs")
+}
+
+enum HousekeepingStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  VERIFIED
+  ISSUE_REPORTED
+}
+
+// Room maintenance tracking
+model MaintenanceIssue {
+  id              String    @id @default(uuid())
+  roomId          String
+  title           String
+  description     String
+  reportedById    String?   // Staff ID who reported it
+  assignedToId    String?   // Staff ID who is assigned to fix
+  priority        MaintenancePriority @default(MEDIUM)
+  status          MaintenanceStatus @default(REPORTED)
+  reportedAt      DateTime  @default(now())
+  scheduledFor    DateTime?
+  completedAt     DateTime?
+  notes           String?
+  isRecurring     Boolean   @default(false)  // Whether this is a recurring issue
+  images          String[]  // URLs to images of the issue
+  cost            Decimal?  @db.Decimal(10, 2) // Cost to fix if applicable
+  
+  // Relations
+  room            Room      @relation(fields: [roomId], references: [id])
+  reportedBy      Staff?    @relation("ReportedByStaff", fields: [reportedById], references: [id])
+  assignedTo      Staff?    @relation("AssignedMaintenanceStaff", fields: [assignedToId], references: [id])
+  
+  @@map("maintenance_issues")
+  @@index([status])
+  @@index([priority])
+  @@index([roomId])
+  @@index([assignedToId])
+}
+
+enum MaintenancePriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum MaintenanceStatus {
+  REPORTED
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  VERIFIED
+  DEFERRED
+}
+
+// Room Item Category (like Electronics, Furniture, Bathroom, etc.)
+model RoomItemCategory {
+  id              String    @id @default(uuid())
+  name            String    @unique
+  description     String?
+  isActive        Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  // Relations
+  items           RoomItem[]
+  
+  @@map("room_item_categories")
+}
+
+// Room Item (like TV, Air Conditioner, Bed, Chair, etc.)
+model RoomItem {
+  id              String    @id @default(uuid())
+  name            String
+  description     String?
+  categoryId      String
+  isActive        Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  // Relations
+  category        RoomItemCategory @relation(fields: [categoryId], references: [id])
+  roomItems       RoomItemInstance[]
+  
+  @@map("room_items")
+}
+
+// Room Item Instance (specific items in specific rooms)
+model RoomItemInstance {
+  id              String    @id @default(uuid())
+  roomId          String
+  itemId          String
+  serialNumber    String?
+  purchaseDate    DateTime?
+  notes           String?
+  status          RoomItemStatus @default(OPERATIONAL)
+  isActive        Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  // Relations
+  room            Room      @relation(fields: [roomId], references: [id])
+  item            RoomItem  @relation(fields: [itemId], references: [id])
+  issues          RoomItemIssue[]
+  
+  @@map("room_item_instances")
+  @@index([roomId])
+  @@index([status])
+}
+
+// Room Item Issue (tracking of broken/malfunctioning items)
+model RoomItemIssue {
+  id              String    @id @default(uuid())
+  roomItemId      String
+  title           String
+  description     String
+  reportedById    String    // Staff ID who reported it
+  reportedAt      DateTime  @default(now())
+  priority        IssuePriority @default(MEDIUM)
+  status          IssueStatus @default(REPORTED)
+  assignedToId    String?   // Staff ID who is assigned to fix
+  scheduledFor    DateTime?
+  completedAt     DateTime?
+  resolutionNotes String?
+  images          String[]  // URLs to images of the issue
+  cost            Decimal?  @db.Decimal(10, 2) // Cost to fix if applicable
+  
+  // Relations
+  roomItem        RoomItemInstance @relation(fields: [roomItemId], references: [id])
+  reportedBy      Staff      @relation("ReportedItemIssues", fields: [reportedById], references: [id])
+  assignedTo      Staff?     @relation("AssignedItemIssues", fields: [assignedToId], references: [id])
+  
+  @@map("room_item_issues")
+  @@index([status])
+  @@index([priority])
+  @@index([assignedToId])
+}
+
+enum RoomItemStatus {
+  OPERATIONAL
+  NEEDS_ATTENTION
+  BROKEN
+  BEING_REPAIRED
+  REPLACED
+  MISSING
+}
+
+enum IssuePriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum IssueStatus {
+  REPORTED
+  ASSESSED
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  VERIFIED
+  CANCELLED
+}
+
+// Inventory management
+model InventoryCategory {
+  id              String    @id @default(uuid())
+  name            String    @unique
+  description     String?
+  parentId        String?   // For subcategories
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  // Relations
+  parent          InventoryCategory?  @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  children        InventoryCategory[] @relation("CategoryHierarchy")
+  items           InventoryItem[]
+  
+  @@map("inventory_categories")
+}
+
+// Inventory items
+model InventoryItem {
+  id              String    @id @default(uuid())
+  name            String
+  description     String?
+  categoryId      String
+  barcode         String?   @unique
+  sku             String?   @unique
+  unit            String    // e.g., "piece", "kg", "liter"
+  minStock        Int       @default(0)
+  currentStock    Int       @default(0)
+  reorderPoint    Int       @default(5)
+  costPrice       Decimal?  @db.Decimal(10, 2)
+  isActive        Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  // Relations
+  category        InventoryCategory @relation(fields: [categoryId], references: [id])
+  transactions    InventoryTransaction[]
+  orderItems      PurchaseOrderItem[]
+  supplierItems   InventoryItemSupplier[]
+  
+  @@map("inventory_items")
+}
+
+// Junction table for inventory items and suppliers
+model InventoryItemSupplier {
+  id              String    @id @default(uuid())
+  itemId          String
+  supplierId      String
+  preferredOrder  Int?      // Order of preference for this supplier
+  supplierSku     String?   // Supplier's SKU for this item
+  defaultPrice    Decimal?  @db.Decimal(10, 2)
+  
+  // Relations
+  item            InventoryItem @relation(fields: [itemId], references: [id])
+  supplier        InventorySupplier @relation(fields: [supplierId], references: [id])
+  
+  @@unique([itemId, supplierId])
+  @@map("inventory_item_suppliers")
+}
+
+// Inventory suppliers
+model InventorySupplier {
+  id              String    @id @default(uuid())
+  name            String
+  contactPerson   String?
+  email           String?
+  phone           String?
+  address         String?
+  notes           String?
+  isActive        Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  // Relations
+  items           InventoryItemSupplier[]
+  purchaseOrders  PurchaseOrder[]
+  
+  @@map("inventory_suppliers")
+}
+
+// Purchase orders
+model PurchaseOrder {
+  id              String    @id @default(uuid())
+  orderNumber     String    @unique
+  supplierId      String
+  staffId         String    // Staff who created the PO
+  orderDate       DateTime  @default(now())
+  expectedDelivery DateTime?
+  status          PurchaseOrderStatus @default(DRAFT)
+  totalAmount     Decimal   @db.Decimal(10, 2)
+  notes           String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  
+  // Relations
+  supplier        InventorySupplier @relation(fields: [supplierId], references: [id])
+  staff           Staff     @relation(fields: [staffId], references: [id])
+  items           PurchaseOrderItem[]
+  
+  @@map("purchase_orders")
+}
+
+// Purchase order items
+model PurchaseOrderItem {
+  id              String    @id @default(uuid())
+  purchaseOrderId String
+  itemId          String
+  quantity        Int
+  unitPrice       Decimal   @db.Decimal(10, 2)
+  totalPrice      Decimal   @db.Decimal(10, 2)
+  receivedQuantity Int       @default(0)
+  
+  // Relations
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id])
+  item            InventoryItem @relation(fields: [itemId], references: [id])
+  
+  @@map("purchase_order_items")
+}
+
+// Inventory transactions
+model InventoryTransaction {
+  id              String    @id @default(uuid())
+  itemId          String
+  quantity        Int       // Positive for stock in, negative for stock out
+  type            InventoryTransactionType
+  referenceId     String?   // ID of related record (e.g., purchase order, stock check)
+  referenceType   String?   // Type of reference (e.g., "PurchaseOrder", "StockCheck")
+  notes           String?
+  staffId         String    // Staff who performed the transaction
+  createdAt       DateTime  @default(now())
+  
+  // Relations
+  item            InventoryItem @relation(fields: [itemId], references: [id])
+  staff           Staff     @relation(fields: [staffId], references: [id])
+  
+  @@map("inventory_transactions")
+}
+
+enum PurchaseOrderStatus {
+  DRAFT
+  ORDERED
+  PARTIALLY_RECEIVED
+  RECEIVED
+  CANCELLED
+}
+
+enum InventoryTransactionType {
+  PURCHASE
+  CONSUMPTION
+  ADJUSTMENT
+  STOCK_CHECK
+  TRANSFER
+  WASTE
+  RETURN
+}
