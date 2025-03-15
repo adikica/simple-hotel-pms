@@ -70,6 +70,7 @@ model Guest {
   firstName       String
   lastName        String
   phone           String?
+  car_plate       String?
   address         String?
   city            String?
   country         String?
@@ -91,26 +92,6 @@ model Guest {
   vehicles        GuestVehicle[]   // Guest vehicles
   
   @@map("guests")
-}
-
-// Guest vehicle information
-model GuestVehicle {
-  id              String    @id @default(uuid())
-  guestId         String
-  licensePlate    String
-  make            String?   // Car manufacturer
-  model           String?   // Car model
-  color           String?
-  notes           String?
-  isPrimary       Boolean   @default(true)
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-  
-  // Relations
-  guest           Guest     @relation(fields: [guestId], references: [id])
-  
-  @@map("guest_vehicles")
-  @@index([licensePlate])
 }
 
 // Staff model for hotel employees (admin, receptionist)
