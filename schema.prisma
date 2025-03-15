@@ -89,7 +89,6 @@ model Guest {
   // Relations
   reservations    Reservation[]    // Guest's reservations
   invoices        Invoice[]        // Invoices issued to this guest
-  vehicles        GuestVehicle[]   // Guest vehicles
   
   @@map("guests")
 }
