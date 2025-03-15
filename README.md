@@ -1,6 +1,4 @@
-##Comming soon
-
- # Hotel PMS Schema Diagram
+# Hotel PMS Schema Diagram
 
 ```
 +----------------+          +---------------+          +----------------+
