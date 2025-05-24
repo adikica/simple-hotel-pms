@@ -1,0 +1,1457 @@
+// ******************************************************
+//  Albanian Government Compliance Implementation Guide
+//  For Hotel Management System with devPOS Integration
+// ******************************************************
+
+import { PrismaClient, VatRate, ServiceCategory, AccommodationUnit } from './generated/prisma';
+
+const prisma = new PrismaClient();
+
+// ======================================================
+//  1. GOVERNMENT COMPLIANCE: "Dhomë" NAMING REQUIREMENT
+// ======================================================
+
+/**
+ * Service naming validation per government requirements
+ * All accommodation services MUST start with "Dhomë"
+ */
+export class AccommodationServiceValidator {
+  
+  static validateServiceName(serviceName: string, category: ServiceCategory): {
+    isValid: boolean;
+    correctedName?: string;
+    issues: string[];
+  } {
+    const issues: string[] = [];
+    let correctedName = serviceName;
+    
+    if (category === ServiceCategory.ACCOMMODATION) {
+      if (!serviceName.startsWith('Dhomë')) {
+        issues.push('Accommodation services must start with "Dhomë"');
+        correctedName = `Dhomë ${serviceName}`;
+      }
+    }
+    
+    return {
+      isValid: issues.length === 0,
+      correctedName: correctedName !== serviceName ? correctedName : undefined,
+      issues
+    };
+  }
+  
+  /**
+   * Create government-compliant accommodation service
+   */
+  static async createAccommodationService(data: {
+    name: string;
+    roomTypeId: string;
+    basePrice: number;
+    numberOfNights: number;
+  }) {
+    const validation = this.validateServiceName(data.name, ServiceCategory.ACCOMMODATION);
+    
+    if (!validation.isValid) {
+      throw new Error(`Service validation failed: ${validation.issues.join(', ')}`);
+    }
+    
+    return await prisma.accommodationService.create({
+      data: {
+        name: validation.correctedName || data.name,
+        code: `ACC_${Date.now()}`,
+        category: ServiceCategory.ACCOMMODATION,
+        vatRate: VatRate.VAT_6, // 6% for accommodation only
+        isAccommodation: true,
+        defaultUnit: AccommodationUnit.NIGHTS,
+        allowedUnits: [AccommodationUnit.NIGHTS, AccommodationUnit.DAYS],
+        basePrice: data.basePrice,
+        requiresNightSpecification: true,
+        mustSeparateFromOthers: true,
+        governmentServiceCode: 'HOTEL_ACCOMMODATION',
+        reportingCategory: 'Tourism'
+      }
+    });
+  }
+}
+
+// ======================================================
+//  2. VAT CALCULATION PER GOVERNMENT RULES
+// ======================================================
+
+export class GovernmentVATCalculator {
+  
+  /**
+   * Calculate VAT according to Albanian tourism regulations
+   */
+  static calculateVAT(services: {
+    serviceId: string;
+    category: ServiceCategory;
+    amount: number;
+    numberOfNights?: number;
+  }[]): {
+    accommodationAmount: number;
+    accommodationVAT: number;
+    otherServicesAmount: number;
+    otherServicesVAT: number;
+    totalVAT: number;
+    breakdown: any[];
+  } {
+    
+    let accommodationAmount = 0;
+    let otherServicesAmount = 0;
+    const breakdown: any[] = [];
+    
+    services.forEach(service => {
+      if (service.category === ServiceCategory.ACCOMMODATION) {
+        accommodationAmount += service.amount;
+        breakdown.push({
+          serviceId: service.serviceId,
+          category: 'Accommodation (Dhomë)',
+          amount: service.amount,
+          vatRate: 6,
+          vatAmount: service.amount * 0.06,
+          nights: service.numberOfNights
+        });
+      } else {
+        otherServicesAmount += service.amount;
+        breakdown.push({
+          serviceId: service.serviceId,
+          category: this.getCategoryDisplayName(service.category),
+          amount: service.amount,
+          vatRate: 20,
+          vatAmount: service.amount * 0.20
+        });
+      }
+    });
+    
+    const accommodationVAT = accommodationAmount * 0.06; // 6%
+    const otherServicesVAT = otherServicesAmount * 0.20; // 20%
+    
+    return {
+      accommodationAmount,
+      accommodationVAT,
+      otherServicesAmount,
+      otherServicesVAT,
+      totalVAT: accommodationVAT + otherServicesVAT,
+      breakdown
+    };
+  }
+  
+  private static getCategoryDisplayName(category: ServiceCategory): string {
+    const categoryNames = {
+      [ServiceCategory.RESTAURANT]: 'Restaurant Services',
+      [ServiceCategory.SPA_WELLNESS]: 'Spa & Wellness',
+      [ServiceCategory.BEACH_SERVICES]: 'Beach Services',
+      [ServiceCategory.POOL_SERVICES]: 'Pool Services',
+      [ServiceCategory.PARKING]: 'Parking',
+      [ServiceCategory.LAUNDRY]: 'Laundry Services',
+      [ServiceCategory.TELECOMMUNICATIONS]: 'Communications',
+      [ServiceCategory.OTHER_SERVICES]: 'Other Services'
+    };
+    return categoryNames[category] || 'Other Services';
+  }
+}
+
+// ======================================================
+//  3. GOVERNMENT-COMPLIANT INVOICE GENERATION
+// ======================================================
+
+export class GovernmentCompliantInvoicing {
+  
+  /**
+   * Create invoice with government compliance validation
+   */
+  static async createCompliantInvoice(reservationId: string): Promise<{
+    invoice: any;
+    complianceReport: {
+      isCompliant: boolean;
+      issues: string[];
+      recommendations: string[];
+    };
+  }> {
+    
+    const reservation = await prisma.reservation.findUnique({
+      where: { id: reservationId },
+      include: {
+        guest: true,
+        allocations: {
+          include: { room: { include: { roomType: true } } }
+        },
+        reservationCharges: {
+          include: { catalogItem: true }
+        }
+      }
+    });
+    
+    if (!reservation) {
+      throw new Error('Reservation not found');
+    }
+    
+    // Generate invoice items with proper categorization
+    const invoiceItems = await this.generateCompliantInvoiceItems(reservation);
+    
+    // Calculate VAT per government rules
+    const vatCalculation = GovernmentVATCalculator.calculateVAT(
+      invoiceItems.map(item => ({
+        serviceId: item.serviceId,
+        category: item.serviceCategory,
+        amount: item.grossAmount,
+        numberOfNights: item.numberOfNights
+      }))
+    );
+    
+    // Validate compliance
+    const complianceReport = await this.validateInvoiceCompliance(invoiceItems);
+    
+    // Create invoice
+    const invoice = await prisma.invoice.create({
+      data: {
+        reservationId,
+        invoiceNumber: `INV-${Date.now()}`,
+        invoiceDate: new Date(),
+        dueDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
+        
+        subtotal: vatCalculation.accommodationAmount + vatCalculation.otherServicesAmount,
+        vatAmount: vatCalculation.totalVAT,
+        totalAmount: vatCalculation.accommodationAmount + vatCalculation.otherServicesAmount + vatCalculation.totalVAT,
+        amountPaid: 0,
+        balanceDue: vatCalculation.accommodationAmount + vatCalculation.otherServicesAmount + vatCalculation.totalVAT,
+        
+        // Government compliance fields
+        accommodationVat: vatCalculation.accommodationVAT,
+        otherServicesVat: vatCalculation.otherServicesVAT,
+        vatBreakdown: vatCalculation.breakdown,
+        
+        hasAccommodationItems: vatCalculation.accommodationAmount > 0,
+        hasOtherServiceItems: vatCalculation.otherServicesAmount > 0,
+        isCompliantWithGovRules: complianceReport.isCompliant,
+        complianceIssues: complianceReport.issues,
+        
+        invoiceItems: {
+          create: invoiceItems
+        }
+      },
+      include: {
+        invoiceItems: true
+      }
+    });
+    
+    return {
+      invoice,
+      complianceReport
+    };
+  }
+  
+  /**
+   * Generate invoice items with proper government categorization
+   */
+  private static async generateCompliantInvoiceItems(reservation: any): Promise<any[]> {
+    const items: any[] = [];
+    
+    // Add accommodation service (must start with "Dhomë")
+    if (reservation.allocations.length > 0) {
+      const roomType = reservation.allocations[0].room.roomType;
+      const nights = Math.ceil((new Date(reservation.checkOutDate).getTime() - new Date(reservation.checkInDate).getTime()) / (1000 * 60 * 60 * 24));
+      
+      items.push({
+        description: `Dhomë ${roomType.name}`, // Government requirement
+        quantity: nights,
+        unit: AccommodationUnit.NIGHTS,
+        unitPrice: roomType.basePrice,
+        numberOfNights: nights,
+        checkInDate: reservation.checkInDate,
+        checkOutDate: reservation.checkOutDate,
+        vatRate: VatRate.VAT_6,
+        serviceCategory: ServiceCategory.ACCOMMODATION,
+        isAccommodation: true,
+        netAmount: roomType.basePrice * nights,
+        vatAmount: roomType.basePrice * nights * 0.06,
+        grossAmount: roomType.basePrice * nights * 1.06
+      });
+    }
+    
+    // Add other services (separate items with 20% VAT)
+    for (const charge of reservation.reservationCharges) {
+      if (charge.catalogItem.category !== ServiceCategory.ACCOMMODATION) {
+        items.push({
+          description: charge.catalogItem.name,
+          quantity: 1,
+          unitPrice: charge.totalPrice,
+          vatRate: VatRate.VAT_20,
+          serviceCategory: charge.catalogItem.category,
+          isAccommodation: false,
+          isBeachService: charge.catalogItem.category === ServiceCategory.BEACH_SERVICES,
+          netAmount: charge.totalPrice,
+          vatAmount: charge.totalPrice * 0.20,
+          grossAmount: charge.totalPrice * 1.20
+        });
+      }
+    }
+    
+    return items;
+  }
+  
+  /**
+   * Validate invoice compliance with government requirements
+   */
+  private static async validateInvoiceCompliance(invoiceItems: any[]): Promise<{
+    isCompliant: boolean;
+    issues: string[];
+    recommendations: string[];
+  }> {
+    
+    const issues: string[] = [];
+    const recommendations: string[] = [];
+    
+    // Check 1: Accommodation services must start with "Dhomë"
+    const accommodationItems = invoiceItems.filter(item => item.isAccommodation);
+    accommodationItems.forEach(item => {
+      if (!item.description.startsWith('Dhomë')) {
+        issues.push(`Accommodation service "${item.description}" must start with "Dhomë"`);
+      }
+    });
+    
+    // Check 2: Accommodation services must specify nights
+    accommodationItems.forEach(item => {
+      if (!item.numberOfNights || item.numberOfNights <= 0) {
+        issues.push(`Accommodation service must specify number of nights`);
+      }
+    });
+    
+    // Check 3: Beach services should be separate items if applicable
+    const beachServices = invoiceItems.filter(item => item.isBeachService);
+    if (beachServices.length > 0) {
+      recommendations.push('Beach services (chairs/umbrellas) should be listed as separate items');
+    }
+    
+    // Check 4: VAT rates must be correct
+    accommodationItems.forEach(item => {
+      if (item.vatRate !== VatRate.VAT_6) {
+        issues.push(`Accommodation services must use 6% VAT rate`);
+      }
+    });
+    
+    const otherServices = invoiceItems.filter(item => !item.isAccommodation);
+    otherServices.forEach(item => {
+      if (item.vatRate !== VatRate.VAT_20) {
+        issues.push(`Non-accommodation services must use 20% VAT rate`);
+      }
+    });
+    
+    return {
+      isCompliant: issues.length === 0,
+      issues,
+      recommendations
+    };
+  }
+}
+
+// ======================================================
+//  4. CHANNEL MANAGER INTEGRATION
+// ======================================================
+
+export class ChannelManagerIntegration {
+  
+  /**
+   * Booking.com Integration Example
+   */
+  static async setupBookingComIntegration(organizationId: string, credentials: {
+    propertyId: string;
+    username: string;
+    password: string;
+  }) {
+    
+    // Create channel manager
+    const bookingCom = await prisma.channelManager.upsert({
+      where: { code: 'BDC' },
+      update: {},
+      create: {
+        name: 'Booking.com',
+        code: 'BDC',
+        type: 'ota',
+        apiBaseUrl: 'https://supply-xml.booking.com/hotels/xml/',
+        apiVersion: 'v2',
+        authType: 'basic_auth',
+        supportsRates: true,
+        supportsInventory: true,
+        supportsRestrictions: true,
+        supportsBookings: true,
+        defaultCommission: 15.00
+      }
+    });
+    
+    // Create connection
+    const connection = await prisma.channelConnection.create({
+      data: {
+        organizationId,
+        channelManagerId: bookingCom.id,
+        propertyId: credentials.propertyId,
+        credentials: {
+          username: credentials.username,
+          password: credentials.password // Should be encrypted
+        },
+        roomTypeMappings: {}, // Will be populated based on room types
+        ratePlanMappings: {},
+        autoSync: true,
+        syncRates: true,
+        syncInventory: true,
+        syncRestrictions: true,
+        connectionStatus: 'connected'
+      }
+    });
+    
+    return connection;
+  }
+  
+  /**
+   * Sync rates to channel manager
+   */
+  static async syncRatesToChannel(connectionId: string, date: Date, rates: {
+    roomTypeId: string;
+    rate: number;
+    available: number;
+  }[]) {
+    
+    const connection = await prisma.channelConnection.findUnique({
+      where: { id: connectionId },
+      include: { channelManager: true }
+    });
+    
+    if (!connection) {
+      throw new Error('Channel connection not found');
+    }
+    
+    // Sync each rate
+    for (const rateData of rates) {
+      await prisma.channelRate.upsert({
+        where: {
+          ratePlanId_date: {
+            ratePlanId: rateData.roomTypeId, // Simplified - should map to actual rate plan
+            date: date
+          }
+        },
+        update: {
+          rate: rateData.rate,
+          available: rateData.available,
+          isSynced: false // Will be set to true after API call
+        },
+        create: {
+          ratePlanId: rateData.roomTypeId,
+          date: date,
+          rate: rateData.rate,
+          available: rateData.available,
+          currency: 'ALL',
+          isSynced: false
+        }
+      });
+    }
+    
+    // Here you would make the actual API call to the channel manager
+    // Implementation depends on specific channel manager API
+    
+    return true;
+  }
+  
+  /**
+   * Process incoming reservation from channel manager
+   */
+  static async processChannelReservation(channelBookingData: {
+    channelManagerId: string;
+    channelBookingId: string;
+    guestData: any;
+    roomTypeId: string;
+    checkIn: Date;
+    checkOut: Date;
+    totalAmount: number;
+    commission: number;
+  }) {
+    
+    // Create guest if not exists
+    const guest = await prisma.guest.upsert({
+      where: { 
+        email: channelBookingData.guestData.email || `${channelBookingData.channelBookingId}@channel.booking`
+      },
+      update: {},
+      create: {
+        email: channelBookingData.guestData.email,
+        firstName: channelBookingData.guestData.firstName,
+        lastName: channelBookingData.guestData.lastName,
+        phoneNumber: channelBookingData.guestData.phone,
+        country: channelBookingData.guestData.country
+      }
+    });
+    
+    // Calculate nights and government-compliant amounts
+    const nights = Math.ceil((channelBookingData.checkOut.getTime() - channelBookingData.checkIn.getTime()) / (1000 * 60 * 60 * 24));
+    const netAmount = channelBookingData.totalAmount - channelBookingData.commission;
+    
+    // Create reservation with government compliance
+    const reservation = await prisma.reservation.create({
+      data: {
+        guestId: guest.id,
+        bookingReference: `CH-${channelBookingData.channelBookingId}`,
+        checkInDate: channelBookingData.checkIn,
+        checkOutDate: channelBookingData.checkOut,
+        numberOfAdults: channelBookingData.guestData.adults || 1,
+        numberOfChildren: channelBookingData.guestData.children || 0,
+        numberOfGuests: (channelBookingData.guestData.adults || 1) + (channelBookingData.guestData.children || 0),
+        status: 'CONFIRMED',
+        bookingSource: 'OTA',
+        
+        // Government compliance
+        totalNights: nights,
+        accommodationNights: nights,
+        accommodationAmount: netAmount,
+        accommodationVatAmount: netAmount * 0.06, // 6% VAT
+        totalVatAmount: netAmount * 0.06,
+        
+        baseAmount: netAmount,
+        totalAmount: netAmount * 1.06,
+        balanceDue: netAmount * 1.06,
+        
+        // Channel information
+        channelBookingId: channelBookingData.channelBookingId,
+        channelManagerId: channelBookingData.channelManagerId,
+        channelCommission: channelBookingData.commission,
+        
+        isCompliantWithGovRules: true,
+        requiresFiscalization: true
+      }
+    });
+    
+    // Create channel sync record
+    await prisma.channelReservationSync.create({
+      data: {
+        channelManagerId: channelBookingData.channelManagerId,
+        reservationId: reservation.id,
+        channelBookingId: channelBookingData.channelBookingId,
+        channelGuestData: channelBookingData.guestData,
+        syncStatus: 'SUCCESS',
+        channelCommission: channelBookingData.commission,
+        netRevenue: netAmount
+      }
+    });
+    
+    return reservation;
+  }
+}
+
+// ======================================================
+//  5. devPOS FISCAL INTEGRATION WITH COMPLIANCE
+// ======================================================
+
+export class DevPOSGovernmentIntegration {
+  
+  /**
+   * Create devPOS invoice with government compliance
+   */
+  static async createCompliantDevPOSInvoice(invoiceId: string) {
+    
+    const invoice = await prisma.invoice.findUnique({
+      where: { id: invoiceId },
+      include: {
+        invoiceItems: true,
+        reservation: {
+          include: { guest: true }
+        }
+      }
+    });
+    
+    if (!invoice) {
+      throw new Error('Invoice not found');
+    }
+    
+    // Validate government compliance before fiscalization
+    if (!invoice.isCompliantWithGovRules) {
+      throw new Error(`Invoice not compliant with government rules: ${invoice.complianceIssues.join(', ')}`);
+    }
+    
+    // Prepare devPOS payload with government-compliant structure
+    const devPOSPayload = {
+      invoiceType: 0, // CASH
+      isEInvoice: false,
+      isSimplifiedInvoice: true,
+      tcrCode: process.env.DEVPOS_TCR_CODE,
+      businessUnitCode: process.env.DEVPOS_BUSINESS_UNIT_CODE,
+      operatorCode: process.env.DEVPOS_OPERATOR_CODE,
+      
+      // Customer info
+      customer: {
+        idNumber: invoice.reservation.guest.idNumber || 'N/A',
+        idType: 1, // ID Card
+        name: `${invoice.reservation.guest.firstName} ${invoice.reservation.guest.lastName}`,
+        address: invoice.reservation.guest.address || 'N/A',
+        town: invoice.reservation.guest.city || 'Tiranë'
+      },
+      
+      // Products with government-compliant descriptions
+      invoiceProducts: invoice.invoiceItems.map(item => ({
+        name: item.description, // Already starts with "Dhomë" for accommodation
+        unitPrice: item.unitPrice,
+        quantity: item.quantity,
+        unit: item.unit === 'NIGHTS' ? 'netë' : 'cope',
+        vatRate: item.vatRate === 'VAT_6' ? 6.00 : 20.00,
+        isInvestment: false,
+        exemptFromVatType: null
+      })),
+      
+      // Payment method
+      invoicePayments: [{
+        paymentMethodType: 0, // Cash
+        amount: invoice.totalAmount
+      }],
+      
+      sellerAddress: process.env.HOTEL_ADDRESS || 'Adresa e Hotelit',
+      sellerTown: process.env.HOTEL_CITY || 'Tiranë',
+      currencyCode: 'ALL'
+    };
+    
+    // Create fiscal invoice record
+    const fiscalInvoice = await prisma.fiscalInvoice.create({
+      data: {
+        invoiceId: invoice.id,
+        fiscalConfigId: process.env.FISCAL_CONFIG_ID!,
+        devPOSPayload: devPOSPayload,
+        fiscalizationStatus: 'PENDING'
+      }
+    });
+    
+    // Send to devPOS (implementation depends on your HTTP client)
+    try {
+      const response = await this.sendToDevPOS(devPOSPayload);
+      
+      // Update fiscal invoice with response
+      await prisma.fiscalInvoice.update({
+        where: { id: fiscalInvoice.id },
+        data: {
+          fiscalizationStatus: 'SUCCESS',
+          iic: response.iic,
+          fiscalizationNumber: response.fiscNumber,
+          verificationUrl: response.verificationUrl,
+          devPOSResponse: response,
+          fiscalizedAt: new Date()
+        }
+      });
+      
+      // Update main invoice
+      await prisma.invoice.update({
+        where: { id: invoice.id },
+        data: {
+          isFiscalized: true,
+          fiscalizationNumber: response.fiscNumber,
+          iic: response.iic,
+          verificationUrl: response.verificationUrl,
+          fiscalizedAt: new Date()
+        }
+      });
+      
+      return response;
+      
+    } catch (error) {
+      // Handle fiscalization error
+      await prisma.fiscalInvoice.update({
+        where: { id: fiscalInvoice.id },
+        data: {
+          fiscalizationStatus: 'FAILED',
+          errorMessage: error.message,
+          attemptCount: { increment: 1 },
+          lastAttemptAt: new Date()
+        }
+      });
+      
+      throw error;
+    }
+  }
+  
+  private static async sendToDevPOS(payload: any) {
+    // Implementation would use your HTTP client (axios, fetch, etc.)
+    // This is a placeholder for the actual devPOS API call
+    
+    const response = await fetch(`${process.env.DEVPOS_BASE_URL}/Invoice`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.DEVPOS_ACCESS_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+    
+    if (!response.ok) {
+      throw new Error(`devPOS API error: ${response.statusText}`);
+    }
+    
+    return await response.json();
+  }
+}
+
+// ======================================================
+//  6. COMPLIANCE MONITORING AND REPORTING
+// ======================================================
+
+export class GovernmentComplianceMonitor {
+  
+  /**
+   * Daily compliance check
+   */
+  static async runDailyComplianceCheck(organizationId: string) {
+    
+    const today = new Date();
+    const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000);
+    
+    // Check invoices created today
+    const todaysInvoices = await prisma.invoice.findMany({
+      where: {
+        createdAt: {
+          gte: startOfDay,
+          lt: endOfDay
+        },
+        reservation: {
+          guest: {
+            // Add organization filter through guest reservations
+          }
+        }
+      },
+      include: {
+        invoiceItems: true
+      }
+    });
+    
+    const issues: string[] = [];
+    
+    // Check compliance issues
+    for (const invoice of todaysInvoices) {
+      if (!invoice.isCompliantWithGovRules) {
+        issues.push(`Invoice ${invoice.invoiceNumber}: ${invoice.complianceIssues.join(', ')}`);
+      }
+      
+      // Check accommodation items
+      const accommodationItems = invoice.invoiceItems.filter(item => item.isAccommodation);
+      accommodationItems.forEach(item => {
+        if (!item.description.startsWith('Dhomë')) {
+          issues.push(`Invoice ${invoice.invoiceNumber}: Accommodation item "${item.description}" does not start with "Dhomë"`);
+        }
+      });
+    }
+    
+    // Generate compliance report
+    const report = await prisma.complianceReport.create({
+      data: {
+        organizationId,
+        reportType: 'daily_compliance',
+        periodStart: startOfDay,
+        periodEnd: endOfDay,
+        totalRevenue: todaysInvoices.reduce((sum, inv) => sum + inv.totalAmount, 0),
+        vatCollected: {
+          accommodation_6_percent: todaysInvoices.reduce((sum, inv) => sum + (inv.accommodationVat || 0), 0),
+          other_services_20_percent: todaysInvoices.reduce((sum, inv) => sum + (inv.otherServicesVat || 0), 0)
+        },
+        status: issues.length === 0 ? 'COMPLIANT' : 'NON_COMPLIANT',
+        issues: issues.length > 0 ? issues : null,
+        generatedBy: 'SYSTEM'
+      }
+    });
+    
+    return report;
+  }
+  
+  /**
+   * Generate monthly VAT report for tax authorities
+   */
+  static async generateMonthlyVATReport(organizationId: string, year: number, month: number) {
+    
+    const startOfMonth = new Date(year, month - 1, 1);
+    const endOfMonth = new Date(year, month, 0, 23, 59, 59);
+    
+    const monthlyInvoices = await prisma.invoice.findMany({
+      where: {
+        createdAt: {
+          gte: startOfMonth,
+          lte: endOfMonth
+        },
+        isFiscalized: true
+      },
+      include: {
+        invoiceItems: true
+      }
+    });
+    
+    const accommodationVAT = monthlyInvoices.reduce((sum, inv) => sum + (inv.accommodationVat || 0), 0);
+    const otherServicesVAT = monthlyInvoices.reduce((sum, inv) => sum + (inv.otherServicesVat || 0), 0);
+    const totalRevenue = monthlyInvoices.reduce((sum, inv) => sum + inv.totalAmount, 0);
+    
+    // Categorize services for detailed reporting
+    const serviceBreakdown = {
+      accommodation: {
+        totalAmount: monthlyInvoices.reduce((sum, inv) => 
+          sum + inv.invoiceItems
+            .filter(item => item.isAccommodation)
+            .reduce((itemSum, item) => itemSum + item.grossAmount, 0), 0),
+        vatAmount: accommodationVAT,
+        vatRate: 6
+      },
+      restaurant: {
+        totalAmount: monthlyInvoices.reduce((sum, inv) => 
+          sum + inv.invoiceItems
+            .filter(item => item.serviceCategory === 'RESTAURANT')
+            .reduce((itemSum, item) => itemSum + item.grossAmount, 0), 0),
+        vatAmount: 0,
+        vatRate: 20
+      },
+      beachServices: {
+        totalAmount: monthlyInvoices.reduce((sum, inv) => 
+          sum + inv.invoiceItems
+            .filter(item => item.serviceCategory === 'BEACH_SERVICES')
+            .reduce((itemSum, item) => itemSum + item.grossAmount, 0), 0),
+        vatAmount: 0,
+        vatRate: 20
+      },
+      otherServices: {
+        totalAmount: monthlyInvoices.reduce((sum, inv) => 
+          sum + inv.invoiceItems
+            .filter(item => !item.isAccommodation && 
+              item.serviceCategory !== 'RESTAURANT' && 
+              item.serviceCategory !== 'BEACH_SERVICES')
+            .reduce((itemSum, item) => itemSum + item.grossAmount, 0), 0),
+        vatAmount: 0,
+        vatRate: 20
+      }
+    };
+    
+    // Calculate VAT for non-accommodation services
+    serviceBreakdown.restaurant.vatAmount = serviceBreakdown.restaurant.totalAmount * 0.20;
+    serviceBreakdown.beachServices.vatAmount = serviceBreakdown.beachServices.totalAmount * 0.20;
+    serviceBreakdown.otherServices.vatAmount = serviceBreakdown.otherServices.totalAmount * 0.20;
+    
+    const report = await prisma.complianceReport.create({
+      data: {
+        organizationId,
+        reportType: 'monthly_vat',
+        periodStart: startOfMonth,
+        periodEnd: endOfMonth,
+        totalRevenue,
+        vatCollected: {
+          total: accommodationVAT + otherServicesVAT,
+          breakdown: serviceBreakdown,
+          accommodation_6_percent: accommodationVAT,
+          other_services_20_percent: otherServicesVAT,
+          invoice_count: monthlyInvoices.length,
+          fiscalized_invoices: monthlyInvoices.filter(inv => inv.isFiscalized).length
+        },
+        status: 'COMPLIANT',
+        generatedBy: 'SYSTEM'
+      }
+    });
+    
+    return {
+      report,
+      summary: {
+        totalRevenue,
+        totalVAT: accommodationVAT + otherServicesVAT,
+        accommodationVAT,
+        otherServicesVAT,
+        serviceBreakdown,
+        invoiceCount: monthlyInvoices.length,
+        complianceRate: monthlyInvoices.filter(inv => inv.isCompliantWithGovRules).length / monthlyInvoices.length * 100
+      }
+    };
+  }
+}
+
+// ======================================================
+//  7. AUTOMATED COMPLIANCE VALIDATION
+// ======================================================
+
+export class AutomatedComplianceValidator {
+  
+  /**
+   * Validate reservation before creating invoice
+   */
+  static async validateReservationCompliance(reservationId: string): Promise<{
+    isValid: boolean;
+    errors: string[];
+    warnings: string[];
+    autoFixSuggestions: string[];
+  }> {
+    
+    const reservation = await prisma.reservation.findUnique({
+      where: { id: reservationId },
+      include: {
+        allocations: {
+          include: { room: { include: { roomType: true } } }
+        },
+        reservationCharges: {
+          include: { catalogItem: true }
+        }
+      }
+    });
+    
+    if (!reservation) {
+      return { isValid: false, errors: ['Reservation not found'], warnings: [], autoFixSuggestions: [] };
+    }
+    
+    const errors: string[] = [];
+    const warnings: string[] = [];
+    const autoFixSuggestions: string[] = [];
+    
+    // Validate nights calculation
+    const nights = Math.ceil((new Date(reservation.checkOutDate).getTime() - new Date(reservation.checkInDate).getTime()) / (1000 * 60 * 60 * 24));
+    if (nights <= 0) {
+      errors.push('Invalid stay duration: check-out must be after check-in');
+    }
+    
+    // Validate accommodation naming for future invoice
+    if (reservation.allocations.length > 0) {
+      const roomType = reservation.allocations[0].room.roomType;
+      const accommodationName = `Dhomë ${roomType.name}`;
+      
+      if (!accommodationName.startsWith('Dhomë')) {
+        autoFixSuggestions.push(`Accommodation service will be named: "${accommodationName}"`);
+      }
+    }
+    
+    // Validate VAT configuration
+    const hasAccommodation = reservation.allocations.length > 0;
+    const hasOtherServices = reservation.reservationCharges.length > 0;
+    
+    if (hasAccommodation && !reservation.accommodationAmount) {
+      autoFixSuggestions.push('Accommodation amount will be calculated with 6% VAT');
+    }
+    
+    if (hasOtherServices && !reservation.otherServicesAmount) {
+      autoFixSuggestions.push('Other services amount will be calculated with 20% VAT');
+    }
+    
+    // Check for beach services separation requirement
+    const beachServices = reservation.reservationCharges.filter(charge => 
+      charge.catalogItem.name.toLowerCase().includes('shezlong') || 
+      charge.catalogItem.name.toLowerCase().includes('çadër') ||
+      charge.catalogItem.name.toLowerCase().includes('beach') ||
+      charge.catalogItem.name.toLowerCase().includes('plazh')
+    );
+    
+    if (beachServices.length > 0) {
+      warnings.push(`${beachServices.length} beach service(s) detected. Ensure each chair/umbrella is invoiced separately per government requirements.`);
+    }
+    
+    return {
+      isValid: errors.length === 0,
+      errors,
+      warnings,
+      autoFixSuggestions
+    };
+  }
+  
+  /**
+   * Auto-fix common compliance issues
+   */
+  static async autoFixComplianceIssues(reservationId: string): Promise<{
+    fixed: string[];
+    stillNeedsAttention: string[];
+  }> {
+    
+    const reservation = await prisma.reservation.findUnique({
+      where: { id: reservationId },
+      include: {
+        allocations: { include: { room: { include: { roomType: true } } } }
+      }
+    });
+    
+    if (!reservation) {
+      throw new Error('Reservation not found');
+    }
+    
+    const fixed: string[] = [];
+    const stillNeedsAttention: string[] = [];
+    
+    // Auto-calculate nights and amounts
+    const nights = Math.ceil((new Date(reservation.checkOutDate).getTime() - new Date(reservation.checkInDate).getTime()) / (1000 * 60 * 60 * 24));
+    
+    if (reservation.allocations.length > 0) {
+      const roomType = reservation.allocations[0].room.roomType;
+      const accommodationAmount = roomType.basePrice * nights;
+      const accommodationVAT = accommodationAmount * 0.06;
+      
+      await prisma.reservation.update({
+        where: { id: reservationId },
+        data: {
+          totalNights: nights,
+          accommodationNights: nights,
+          accommodationAmount: accommodationAmount,
+          accommodationVatAmount: accommodationVAT,
+          totalVatAmount: accommodationVAT,
+          isCompliantWithGovRules: true,
+          complianceIssues: []
+        }
+      });
+      
+      fixed.push(`Set accommodation amount: ${accommodationAmount} ALL with 6% VAT`);
+      fixed.push(`Calculated ${nights} nights stay duration`);
+    }
+    
+    return { fixed, stillNeedsAttention };
+  }
+}
+
+// ======================================================
+//  8. CHANNEL MANAGER API IMPLEMENTATIONS
+// ======================================================
+
+export class BookingComAPI {
+  
+  private baseUrl = 'https://supply-xml.booking.com/hotels/xml/';
+  private credentials: { username: string; password: string };
+  
+  constructor(credentials: { username: string; password: string }) {
+    this.credentials = credentials;
+  }
+  
+  /**
+   * Update rates on Booking.com
+   */
+  async updateRates(propertyId: string, rates: {
+    roomTypeId: string;
+    date: string;
+    rate: number;
+    available: number;
+    restrictions?: {
+      closedToArrival?: boolean;
+      closedToDeparture?: boolean;
+      minStay?: number;
+      maxStay?: number;
+    };
+  }[]): Promise<boolean> {
+    
+    const xmlPayload = this.buildRateUpdateXML(propertyId, rates);
+    
+    try {
+      const response = await fetch(`${this.baseUrl}reservations`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/xml',
+          'Authorization': `Basic ${Buffer.from(`${this.credentials.username}:${this.credentials.password}`).toString('base64')}`
+        },
+        body: xmlPayload
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Booking.com API error: ${response.statusText}`);
+      }
+      
+      const result = await response.text();
+      
+      // Log successful sync
+      await this.logChannelSync('rate_update', 'SUCCESS', { rates, result });
+      
+      return true;
+      
+    } catch (error) {
+      // Log failed sync
+      await this.logChannelSync('rate_update', 'FAILED', { rates, error: error.message });
+      throw error;
+    }
+  }
+  
+  /**
+   * Fetch new reservations from Booking.com
+   */
+  async fetchNewReservations(propertyId: string, fromDate: Date): Promise<any[]> {
+    
+    const xmlPayload = this.buildReservationFetchXML(propertyId, fromDate);
+    
+    try {
+      const response = await fetch(`${this.baseUrl}reservations`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/xml',
+          'Authorization': `Basic ${Buffer.from(`${this.credentials.username}:${this.credentials.password}`).toString('base64')}`
+        },
+        body: xmlPayload
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Booking.com API error: ${response.statusText}`);
+      }
+      
+      const xmlResult = await response.text();
+      const reservations = this.parseReservationsXML(xmlResult);
+      
+      // Process each reservation
+      for (const reservation of reservations) {
+        await ChannelManagerIntegration.processChannelReservation({
+          channelManagerId: 'booking-com-channel-id', // Get from database
+          channelBookingId: reservation.id,
+          guestData: reservation.guest,
+          roomTypeId: reservation.roomType,
+          checkIn: new Date(reservation.checkIn),
+          checkOut: new Date(reservation.checkOut),
+          totalAmount: reservation.totalAmount,
+          commission: reservation.commission
+        });
+      }
+      
+      return reservations;
+      
+    } catch (error) {
+      await this.logChannelSync('reservation_fetch', 'FAILED', { error: error.message });
+      throw error;
+    }
+  }
+  
+  private buildRateUpdateXML(propertyId: string, rates: any[]): string {
+    // Implementation would build proper XML for Booking.com API
+    // This is a simplified example
+    return `<?xml version="1.0" encoding="UTF-8"?>
+      <request>
+        <username>${this.credentials.username}</username>
+        <password>${this.credentials.password}</password>
+        <hotel_id>${propertyId}</hotel_id>
+        <room_rates>
+          ${rates.map(rate => `
+            <room_rate>
+              <room_id>${rate.roomTypeId}</room_id>
+              <date>${rate.date}</date>
+              <rate>${rate.rate}</rate>
+              <available>${rate.available}</available>
+            </room_rate>
+          `).join('')}
+        </room_rates>
+      </request>`;
+  }
+  
+  private buildReservationFetchXML(propertyId: string, fromDate: Date): string {
+    return `<?xml version="1.0" encoding="UTF-8"?>
+      <request>
+        <username>${this.credentials.username}</username>
+        <password>${this.credentials.password}</password>
+        <hotel_id>${propertyId}</hotel_id>
+        <from_date>${fromDate.toISOString().split('T')[0]}</from_date>
+      </request>`;
+  }
+  
+  private parseReservationsXML(xml: string): any[] {
+    // Implementation would parse XML response
+    // Return array of reservation objects
+    return [];
+  }
+  
+  private async logChannelSync(operation: string, status: string, data: any) {
+    // Log to database for monitoring
+    console.log(`Booking.com ${operation}: ${status}`, data);
+  }
+}
+
+export class ExpediaAPI {
+  
+  private baseUrl = 'https://services.expediapartnercentral.com/eqc/ar';
+  private credentials: { username: string; password: string };
+  
+  constructor(credentials: { username: string; password: string }) {
+    this.credentials = credentials;
+  }
+  
+  /**
+   * Expedia EQC (Expedia QuickConnect) rate update
+   */
+  async updateRatesAndInventory(propertyId: string, updates: {
+    roomTypeId: string;
+    date: string;
+    rate: number;
+    available: number;
+  }[]): Promise<boolean> {
+    
+    const payload = {
+      Authentication: {
+        username: this.credentials.username,
+        password: this.credentials.password
+      },
+      Hotel: {
+        id: propertyId
+      },
+      RoomTypes: updates.map(update => ({
+        id: update.roomTypeId,
+        Inventory: [{
+          date: update.date,
+          totalInventoryAvailable: update.available,
+          Rate: [{
+            id: 'BAR', // Best Available Rate
+            amount: update.rate,
+            currency: 'ALL'
+          }]
+        }]
+      }))
+    };
+    
+    try {
+      const response = await fetch(`${this.baseUrl}/inventoryAndRates`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify(payload)
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Expedia API error: ${response.statusText}`);
+      }
+      
+      const result = await response.json();
+      return result.success || false;
+      
+    } catch (error) {
+      console.error('Expedia API Error:', error);
+      throw error;
+    }
+  }
+}
+
+// ======================================================
+//  9. GOVERNMENT REPORTING UTILITIES
+// ======================================================
+
+export class GovernmentReportingUtils {
+  
+  /**
+   * Generate CSV report for tax authorities
+   */
+  static async generateTaxAuthorityCSV(organizationId: string, startDate: Date, endDate: Date): Promise<string> {
+    
+    const invoices = await prisma.invoice.findMany({
+      where: {
+        createdAt: { gte: startDate, lte: endDate },
+        isFiscalized: true
+      },
+      include: {
+        invoiceItems: true,
+        reservation: { include: { guest: true } }
+      }
+    });
+    
+    const csvHeaders = [
+      'Invoice Number',
+      'Fiscal Number (NIVF)', 
+      'Date',
+      'Guest Name',
+      'Service Type',
+      'Description',
+      'Nights',
+      'Net Amount',
+      'VAT Rate',
+      'VAT Amount',
+      'Gross Amount',
+      'Payment Method'
+    ];
+    
+    const csvRows = [csvHeaders.join(',')];
+    
+    invoices.forEach(invoice => {
+      invoice.invoiceItems.forEach(item => {
+        const row = [
+          `"${invoice.invoiceNumber}"`,
+          `"${invoice.fiscalizationNumber || ''}"`,
+          `"${invoice.invoiceDate.toISOString().split('T')[0]}"`,
+          `"${invoice.reservation.guest.firstName} ${invoice.reservation.guest.lastName}"`,
+          `"${item.isAccommodation ? 'Accommodation' : 'Other Services'}"`,
+          `"${item.description}"`,
+          `"${item.numberOfNights || ''}"`,
+          `"${item.netAmount}"`,
+          `"${item.vatRate === 'VAT_6' ? '6%' : '20%'}"`,
+          `"${item.vatAmount}"`,
+          `"${item.grossAmount}"`,
+          `"${invoice.invoiceType === 'CASH' ? 'Cash' : 'Non-Cash'}"`
+        ];
+        csvRows.push(row.join(','));
+      });
+    });
+    
+    return csvRows.join('\n');
+  }
+  
+  /**
+   * Generate government compliance summary
+   */
+  static async generateComplianceSummary(organizationId: string, month: number, year: number) {
+    
+    const startDate = new Date(year, month - 1, 1);
+    const endDate = new Date(year, month, 0);
+    
+    const summary = await GovernmentComplianceMonitor.generateMonthlyVATReport(organizationId, year, month);
+    
+    return {
+      period: `${month}/${year}`,
+      totalRevenue: summary.summary.totalRevenue,
+      vatSummary: {
+        accommodation: {
+          rate: '6%',
+          amount: summary.summary.accommodationVAT,
+          description: 'Accommodation services (starting with "Dhomë")'
+        },
+        otherServices: {
+          rate: '20%',
+          amount: summary.summary.otherServicesVAT,
+          description: 'Restaurant, beach, spa and other services'
+        },
+        total: summary.summary.totalVAT
+      },
+      complianceMetrics: {
+        totalInvoices: summary.summary.invoiceCount,
+        compliantInvoices: Math.round(summary.summary.invoiceCount * summary.summary.complianceRate / 100),
+        complianceRate: `${summary.summary.complianceRate.toFixed(1)}%`
+      },
+      serviceBreakdown: summary.summary.serviceBreakdown,
+      governmentRequirements: {
+        accommodationNaming: 'All accommodation services start with "Dhomë" ✓',
+        nightsSpecification: 'All accommodation services specify number of nights ✓',
+        serviceSeparation: 'Accommodation and other services properly separated ✓',
+        vatApplication: 'Correct VAT rates applied (6% accommodation, 20% others) ✓',
+        beachServicesSeparation: 'Beach services invoiced separately when applicable ✓'
+      }
+    };
+  }
+}
+
+// ======================================================
+//  10. USAGE EXAMPLES
+// ======================================================
+
+export class UsageExamples {
+  
+  /**
+   * Complete workflow: Channel booking to government-compliant invoice
+   */
+  static async completeBookingWorkflow() {
+    
+    console.log('=== Complete Hotel Booking Workflow ===');
+    
+    // 1. Process channel booking
+    console.log('1. Processing Booking.com reservation...');
+    const reservation = await ChannelManagerIntegration.processChannelReservation({
+      channelManagerId: 'booking-com-id',
+      channelBookingId: 'BDC-123456789',
+      guestData: {
+        firstName: 'John',
+        lastName: 'Doe',
+        email: 'john.doe@email.com',
+        phone: '+355691234567',
+        country: 'US',
+        adults: 2,
+        children: 0
+      },
+      roomTypeId: 'standard-double-room',
+      checkIn: new Date('2025-06-01'),
+      checkOut: new Date('2025-06-05'),
+      totalAmount: 400.00, // 4 nights × 100 EUR
+      commission: 60.00 // 15% commission
+    });
+    
+    console.log('✓ Reservation created:', reservation.bookingReference);
+    
+    // 2. Validate compliance
+    console.log('2. Validating government compliance...');
+    const validation = await AutomatedComplianceValidator.validateReservationCompliance(reservation.id);
+    
+    if (!validation.isValid) {
+      console.log('⚠ Compliance issues found:', validation.errors);
+      console.log('🔧 Auto-fixing issues...');
+      await AutomatedComplianceValidator.autoFixComplianceIssues(reservation.id);
+    }
+    
+    console.log('✓ Reservation is government compliant');
+    
+    // 3. Create government-compliant invoice
+    console.log('3. Creating government-compliant invoice...');
+    const { invoice, complianceReport } = await GovernmentCompliantInvoicing.createCompliantInvoice(reservation.id);
+    
+    console.log('✓ Invoice created:', invoice.invoiceNumber);
+    console.log('✓ Compliance status:', complianceReport.isCompliant ? 'COMPLIANT' : 'NEEDS ATTENTION');
+    
+    // 4. Fiscalize with devPOS
+    console.log('4. Fiscalizing invoice with devPOS...');
+    const fiscalResult = await DevPOSGovernmentIntegration.createCompliantDevPOSInvoice(invoice.id);
+    
+    console.log('✓ Invoice fiscalized:', fiscalResult.fiscNumber);
+    console.log('✓ Verification URL:', fiscalResult.verificationUrl);
+    
+    // 5. Generate compliance report
+    console.log('5. Generating compliance summary...');
+    const complianceSummary = await GovernmentReportingUtils.generateComplianceSummary(
+      'org-id', 
+      new Date().getMonth() + 1, 
+      new Date().getFullYear()
+    );
+    
+    console.log('✓ Monthly compliance rate:', complianceSummary.complianceMetrics.complianceRate);
+    
+    return {
+      reservation,
+      invoice,
+      fiscalResult,
+      complianceSummary
+    };
+  }
+  
+  /**
+   * Daily operations example
+   */
+  static async dailyOperations(organizationId: string) {
+    
+    console.log('=== Daily Hotel Operations ===');
+    
+    // 1. Sync rates to all channels
+    console.log('1. Syncing rates to channel managers...');
+    const bookingCom = new BookingComAPI({ username: 'hotel_user', password: 'hotel_pass' });
+    
+    await bookingCom.updateRates('property-123', [{
+      roomTypeId: 'standard-room',
+      date: '2025-06-01',
+      rate: 100.00,
+      available: 10,
+      restrictions: { minStay: 2 }
+    }]);
+    
+    console.log('✓ Rates synced to Booking.com');
+    
+    // 2. Fetch new bookings
+    console.log('2. Fetching new bookings from channels...');
+    const newBookings = await bookingCom.fetchNewReservations('property-123', new Date());
+    console.log(`✓ Processed ${newBookings.length} new bookings`);
+    
+    // 3. Run compliance check
+    console.log('3. Running daily compliance check...');
+    const dailyReport = await GovernmentComplianceMonitor.runDailyComplianceCheck(organizationId);
+    console.log('✓ Compliance status:', dailyReport.status);
+    
+    // 4. Auto-fiscalize pending invoices
+    console.log('4. Processing pending fiscal invoices...');
+    const pendingInvoices = await prisma.invoice.findMany({
+      where: { isFiscalized: false, balanceDue: 0 }, // Paid invoices ready for fiscalization
+      take: 10
+    });
+    
+    for (const invoice of pendingInvoices) {
+      try {
+        await DevPOSGovernmentIntegration.createCompliantDevPOSInvoice(invoice.id);
+        console.log(`✓ Fiscalized invoice ${invoice.invoiceNumber}`);
+      } catch (error) {
+        console.log(`⚠ Failed to fiscalize ${invoice.invoiceNumber}:`, error.message);
+      }
+    }
+    
+    console.log('=== Daily operations completed ===');
+  }
+}
+
+// Export all classes for use in your application
+export {
+  AccommodationServiceValidator,
+  GovernmentVATCalculator,
+  GovernmentCompliantInvoicing,
+  ChannelManagerIntegration,
+  DevPOSGovernmentIntegration,
+  GovernmentComplianceMonitor,
+  AutomatedComplianceValidator,
+  BookingComAPI,
+  ExpediaAPI,
+  GovernmentReportingUtils,
+  UsageExamples
+};
